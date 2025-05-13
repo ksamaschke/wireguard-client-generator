@@ -80,6 +80,27 @@ sudo ./wireguard_gen.sh -e 192.168.9.1:51820 -n 5
 sudo ./wireguard_gen.sh -d "1.1.1.1, 1.0.0.1"
 ```
 
+**Generate 5 configs with split-tunneling for specific subnets only:**
+```bash
+sudo ./wireguard_gen.sh -n 5 -a "192.168.16.0/20,192.168.112.0/24"
+```
+
+## Understanding AllowedIPs
+
+The `--allowed-ips` parameter is important for controlling what traffic gets routed through the VPN:
+
+- **Full Tunnel** (default): `0.0.0.0/0, ::/0`  
+  Routes all traffic through the VPN, including internet access.
+
+- **Split Tunnel** (private networks only): `10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16`  
+  Only routes traffic to standard private IP ranges through the VPN.
+
+- **Specific Subnets**: `192.168.16.0/20,192.168.112.0/24`  
+  Only routes traffic to the specified subnets through the VPN.
+
+- **VPN Subnet Only**: If your VPN uses 192.168.48.0/24, use `192.168.48.0/24`  
+  Only routes traffic within the VPN's own subnet.
+
 ## Output
 
 The script creates:

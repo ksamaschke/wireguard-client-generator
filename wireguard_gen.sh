@@ -2,7 +2,7 @@
 
 # Default values (will try to auto-detect from server config when possible)
 DEFAULT_SERVER_INTERFACE="wg0"
-DEFAULT_CLIENT_COUNT=1
+DEFAULT_CLIENT_COUNT=20
 DEFAULT_CONFIG_DIR="wg-configs"
 DEFAULT_CLIENT_PREFIX="client"
 USE_PRESHARED_KEY=true
@@ -134,10 +134,14 @@ fi
 
 echo "Extracting configuration from $SERVER_CONFIG..."
 
+# Create a temporary copy of the server config to work with
+TEMP_CONFIG=$(mktemp)
+sudo cat "$SERVER_CONFIG" > "$TEMP_CONFIG"
+
 # Auto-detect server's public key if not specified
 if [ -z "$SERVER_PUBLIC_KEY" ]; then
     # Try to generate public key from private key
-    SERVER_PRIVATE_KEY=$(sudo grep -E "^PrivateKey\s*=" "$SERVER_CONFIG" | sed 's/PrivateKey\s*=\s*//' | tr -d ' \t')
+    SERVER_PRIVATE_KEY=$(grep -E "^PrivateKey\s*=" "$TEMP_CONFIG" | sed 's/PrivateKey\s*=\s*//' | tr -d ' \t')
     
     if [ -n "$SERVER_PRIVATE_KEY" ]; then
         # Generate public key from private key
@@ -157,7 +161,7 @@ if [ -z "$SERVER_PUBLIC_KEY" ]; then
 fi
 
 # Auto-detect server address if not specified
-SERVER_ADDRESS=$(sudo grep -E "^Address\s*=" "$SERVER_CONFIG" | sed 's/Address\s*=\s*//' | tr -d ' \t')
+SERVER_ADDRESS=$(grep -E "^Address\s*=" "$TEMP_CONFIG" | sed 's/Address\s*=\s*//' | tr -d ' \t')
 if [ -n "$SERVER_ADDRESS" ]; then
     # Extract subnet from server address (e.g., 192.168.48.254/24 -> 192.168.48)
     if [[ "$SERVER_ADDRESS" =~ ([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+/[0-9]+ ]]; then
@@ -177,7 +181,7 @@ if [ -z "$CLIENT_SUBNET" ]; then
 fi
 
 # Auto-detect server listen port
-SERVER_PORT=$(sudo grep -E "^ListenPort\s*=" "$SERVER_CONFIG" | sed 's/ListenPort\s*=\s*//' | tr -d ' \t')
+SERVER_PORT=$(grep -E "^ListenPort\s*=" "$TEMP_CONFIG" | sed 's/ListenPort\s*=\s*//' | tr -d ' \t')
 if [ -z "$SERVER_PORT" ]; then
     SERVER_PORT="51820"  # Default WireGuard port
     echo "Using default server port: $SERVER_PORT"
@@ -205,7 +209,7 @@ fi
 
 # Auto-detect MTU if not specified
 if [ -z "$MTU" ]; then
-    AUTO_MTU=$(sudo grep -E "^MTU\s*=" "$SERVER_CONFIG" | sed 's/MTU\s*=\s*//' | tr -d ' \t')
+    AUTO_MTU=$(grep -E "^MTU\s*=" "$TEMP_CONFIG" | sed 's/MTU\s*=\s*//' | tr -d ' \t')
     if [ -n "$AUTO_MTU" ]; then
         MTU="$AUTO_MTU"
         echo "Detected MTU: $MTU"
@@ -215,11 +219,18 @@ if [ -z "$MTU" ]; then
     fi
 fi
 
-# Auto-detect AllowedIPs if not specified
+# Set AllowedIPs if not specified
 if [ -z "$ALLOWED_IPS" ]; then
-    # Default to full VPN routing since that's common
+    # In client configs, AllowedIPs determines what traffic goes through the VPN
+    # Standard options:
+    # - "0.0.0.0/0, ::/0" = Full tunnel (all traffic through VPN)
+    # - "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16" = Split tunnel (only private IPs)
+    # - "$CLIENT_SUBNET.0/24" = Only VPN subnet traffic
+    
+    # Default to full VPN routing (most common and secure setup)
     ALLOWED_IPS="0.0.0.0/0, ::/0"
     echo "Using default AllowedIPs for full tunnel: $ALLOWED_IPS"
+    echo "To use split tunneling, use -a option with alternative settings"
 fi
 
 # Auto-detect last used IP if not specified
@@ -232,44 +243,43 @@ if [ -z "$STARTING_IP" ]; then
         SERVER_LAST_OCTET="254"  # Default based on your example
     fi
     
-    # DEBUGGING: Create a temporary file with the config contents
-    TEMP_CONFIG=$(mktemp)
-    sudo cat "$SERVER_CONFIG" > "$TEMP_CONFIG"
-    echo "DEBUG: Temporary config stored at $TEMP_CONFIG"
-    echo "DEBUG: Full WireGuard config contents:"
-    cat "$TEMP_CONFIG"
-    echo "DEBUG: ----------------"
-    
-    # DEBUGGING: Show all AllowedIPs lines
-    echo "DEBUG: All AllowedIPs lines in config:"
-    grep -E "^AllowedIPs" "$TEMP_CONFIG"
-    echo "DEBUG: ----------------"
-    
-    # Extract all existing peer AllowedIPs (both with and without /32)
-    # Create an empty array to store the last octets of peer IPs
+    # More direct approach: Look for IP addresses in the config
+    echo "Scanning for existing peer IPs..."
+    # Extract all lines with AllowedIPs
     PEER_IPS=()
     
-    # Direct grep of the whole file for simplicity and debugging
-    while read -r line; do
-        echo "DEBUG: Processing line: $line"
-        # Try to match IP addresses with or without /32
-        if [[ "$line" =~ AllowedIPs[[:space:]]*=[[:space:]]*${CLIENT_SUBNET}\.([0-9]+)(/[0-9]+)? ]]; then
-            LAST_OCTET="${BASH_REMATCH[1]}"
-            PEER_IPS+=("$LAST_OCTET")
-            echo "DEBUG: Found peer with IP: ${CLIENT_SUBNET}.${LAST_OCTET}"
-        else
-            echo "DEBUG: Line did not match pattern"
+    # Use a completely different approach that doesn't rely on regex patterns
+    # Instead, extract all AllowedIPs lines and then process each one
+    # This is much more reliable than trying to match with a complex regex
+    while IFS= read -r line; do
+        # First, check if this line contains AllowedIPs
+        if [[ "$line" == *"AllowedIPs"* ]]; then
+            # Extract everything after the equals sign
+            IP_PART=${line#*=}
+            # Trim leading and trailing whitespace
+            IP_PART=$(echo "$IP_PART" | xargs)
+            
+            # Now we have just the IP address part
+            echo "Found allowed IP: $IP_PART"
+            
+            # Check if it's in our subnet
+            if [[ "$IP_PART" == "$CLIENT_SUBNET"* ]]; then
+                # Extract the last octet, with or without /32
+                if [[ "$IP_PART" =~ $CLIENT_SUBNET\.([0-9]+)(/[0-9]+)? ]]; then
+                    LAST_OCTET="${BASH_REMATCH[1]}"
+                    echo "Found peer IP in our subnet: $CLIENT_SUBNET.$LAST_OCTET"
+                    PEER_IPS+=("$LAST_OCTET")
+                fi
+            fi
         fi
-    done < <(grep -E "^AllowedIPs" "$TEMP_CONFIG")
-    
-    # DEBUGGING: List all found peer IPs
-    echo "DEBUG: All peer IPs found: ${PEER_IPS[*]}"
+    done < "$TEMP_CONFIG"
     
     # Find highest IP or set default
     if [ ${#PEER_IPS[@]} -gt 0 ]; then
         # Sort numerically and get highest
         HIGHEST_IP=$(printf '%s\n' "${PEER_IPS[@]}" | sort -n | tail -1)
         STARTING_IP=$((HIGHEST_IP + 1))
+        echo "All peer IPs found: ${PEER_IPS[*]}"
         echo "Highest IP in use: ${CLIENT_SUBNET}.${HIGHEST_IP}"
         echo "Starting new clients at: ${CLIENT_SUBNET}.${STARTING_IP}"
     else
@@ -278,15 +288,15 @@ if [ -z "$STARTING_IP" ]; then
         echo "No existing peers found. Starting from ${CLIENT_SUBNET}.${STARTING_IP}"
     fi
     
-    # Clean up temp file
-    rm -f "$TEMP_CONFIG"
-    
     # Ensure we're not using the server's IP
     if [ "$STARTING_IP" -eq "$SERVER_LAST_OCTET" ]; then
         STARTING_IP=$((STARTING_IP + 1))
         echo "Adjusted starting IP to avoid server IP: ${CLIENT_SUBNET}.${STARTING_IP}"
     fi
 fi
+
+# Clean up temp file
+rm -f "$TEMP_CONFIG"
 
 echo "----------------------------------------"
 echo "Configuration Summary:"
