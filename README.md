@@ -54,6 +54,7 @@ Optional Settings:
   -c, --config-dir            Directory to store configs (default: wg-configs)
   -p, --prefix                Client name prefix (default: client)
   -d, --dns                   DNS servers (default: auto-detected or none)
+  -t, --template              Use existing client config as template for settings
   --no-preshared              Disable generation of preshared keys
   --no-append                 Don't append to server config (just generate clients)
 ```
@@ -85,6 +86,11 @@ sudo ./wireguard_gen.sh -d "1.1.1.1, 1.0.0.1"
 sudo ./wireguard_gen.sh -n 5 -a "192.168.16.0/20,192.168.112.0/24"
 ```
 
+**Use an existing client config as a template for settings:**
+```bash
+sudo ./wireguard_gen.sh -t wg-configs/client1.conf -n 3 -p new-client
+```
+
 ## Understanding AllowedIPs
 
 The `--allowed-ips` parameter is important for controlling what traffic gets routed through the VPN:
@@ -100,6 +106,25 @@ The `--allowed-ips` parameter is important for controlling what traffic gets rou
 
 - **VPN Subnet Only**: If your VPN uses 192.168.48.0/24, use `192.168.48.0/24`  
   Only routes traffic within the VPN's own subnet.
+
+## Using Templates
+
+The script can use an existing client configuration as a template when generating new client configs. This is useful when:
+
+1. You have already customized a client with specific settings
+2. You want to maintain consistent settings across all clients
+3. You need to reproduce a configuration with specific tunneling settings
+
+When using the `-t` or `--template` option, the script will extract and apply the following settings:
+
+- **AllowedIPs**: Determines which traffic is routed through the VPN
+- **MTU**: Maximum Transmission Unit setting
+- **DNS**: DNS servers used when connected to the VPN
+- **Endpoint**: The server's public address and port (very useful for NAT setups)
+
+Using a template is especially helpful for correct endpoint configuration. When not using a template, the script can only determine the server's local IP, which typically won't work for clients connecting from outside your network.
+
+**Note**: Command-line parameters will always override template settings. For example, if you specify both `-t client1.conf` and `-a "10.0.0.0/8"`, the AllowedIPs from the command line will be used.
 
 ## Output
 

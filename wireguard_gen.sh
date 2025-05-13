@@ -25,6 +25,7 @@ show_help() {
     echo "  -c, --config-dir            Directory to store configs (default: $DEFAULT_CONFIG_DIR)"
     echo "  -p, --prefix                Client name prefix (default: $DEFAULT_CLIENT_PREFIX)"
     echo "  -d, --dns                   DNS servers (default: auto-detected or none)"
+    echo "  -t, --template              Use existing client config as template for settings"
     echo "  --no-preshared              Disable generation of preshared keys"
     echo "  --no-append                 Don't append to server config (just generate clients)"
     echo
@@ -33,6 +34,9 @@ show_help() {
     echo
     echo "Example overriding endpoint (for port forwarding):"
     echo "  $0 -e public.example.com:51820"
+    echo
+    echo "Example using an existing client config as template:"
+    echo "  $0 -t wg-configs/client1.conf -n 5"
 }
 
 # Parse command line arguments
@@ -48,6 +52,7 @@ DNS_SERVERS=""
 CONFIG_DIR=$DEFAULT_CONFIG_DIR
 CLIENT_PREFIX=$DEFAULT_CLIENT_PREFIX
 APPEND_TO_SERVER=true
+TEMPLATE_CONFIG=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -99,6 +104,10 @@ while [[ $# -gt 0 ]]; do
             CLIENT_PREFIX="$2"
             shift 2
             ;;
+        -t|--template)
+            TEMPLATE_CONFIG="$2"
+            shift 2
+            ;;
         --no-preshared)
             USE_PRESHARED_KEY=false
             shift
@@ -137,6 +146,50 @@ echo "Extracting configuration from $SERVER_CONFIG..."
 # Create a temporary copy of the server config to work with
 TEMP_CONFIG=$(mktemp)
 sudo cat "$SERVER_CONFIG" > "$TEMP_CONFIG"
+
+# Save original command-line specified SERVER_ENDPOINT if present
+CMDLINE_SERVER_ENDPOINT="$SERVER_ENDPOINT"
+
+# Process template config if provided
+if [ -n "$TEMPLATE_CONFIG" ]; then
+    if [ -f "$TEMPLATE_CONFIG" ]; then
+        echo "Using template config: $TEMPLATE_CONFIG"
+        
+        # Extract settings from template if not explicitly set by command line parameters
+        if [ -z "$ALLOWED_IPS" ]; then
+            TEMPLATE_ALLOWED_IPS=$(grep -E "^AllowedIPs\s*=" "$TEMPLATE_CONFIG" | sed 's/AllowedIPs\s*=\s*//' | tr -d ' \t')
+            if [ -n "$TEMPLATE_ALLOWED_IPS" ]; then
+                ALLOWED_IPS="$TEMPLATE_ALLOWED_IPS"
+                echo "Using AllowedIPs from template: $ALLOWED_IPS"
+            fi
+        fi
+        
+        if [ -z "$MTU" ]; then
+            TEMPLATE_MTU=$(grep -E "^MTU\s*=" "$TEMPLATE_CONFIG" | sed 's/MTU\s*=\s*//' | tr -d ' \t')
+            if [ -n "$TEMPLATE_MTU" ]; then
+                MTU="$TEMPLATE_MTU"
+                echo "Using MTU from template: $MTU"
+            fi
+        fi
+        
+        if [ -z "$DNS_SERVERS" ]; then
+            TEMPLATE_DNS=$(grep -E "^DNS\s*=" "$TEMPLATE_CONFIG" | sed 's/DNS\s*=\s*//' | tr -d ' \t')
+            if [ -n "$TEMPLATE_DNS" ]; then
+                DNS_SERVERS="$TEMPLATE_DNS"
+                echo "Using DNS from template: $DNS_SERVERS"
+            fi
+        fi
+        
+        # Extract endpoint from template if it has one
+        TEMPLATE_ENDPOINT=$(grep -E "^Endpoint\s*=" "$TEMPLATE_CONFIG" | sed 's/Endpoint\s*=\s*//' | tr -d ' \t')
+        if [ -n "$TEMPLATE_ENDPOINT" ]; then
+            # Only store it for now, will apply based on precedence later
+            echo "Found Endpoint in template: $TEMPLATE_ENDPOINT"
+        fi
+    else
+        echo "Warning: Template config $TEMPLATE_CONFIG not found, using defaults"
+    fi
+fi
 
 # Auto-detect server's public key if not specified
 if [ -z "$SERVER_PUBLIC_KEY" ]; then
@@ -189,8 +242,21 @@ else
     echo "Detected server port: $SERVER_PORT"
 fi
 
-# Auto-detect server endpoint if not specified
-if [ -z "$SERVER_ENDPOINT" ]; then
+# Handle endpoint with proper precedence:
+# 1. Command-line parameter (highest priority)
+# 2. Template config
+# 3. Auto-detection (lowest priority)
+
+# Restore the original command-line SERVER_ENDPOINT if it was provided
+if [ -n "$CMDLINE_SERVER_ENDPOINT" ]; then
+    SERVER_ENDPOINT="$CMDLINE_SERVER_ENDPOINT"
+    echo "Using command-line specified endpoint: $SERVER_ENDPOINT"
+# Use template endpoint if available
+elif [ -n "$TEMPLATE_ENDPOINT" ]; then
+    SERVER_ENDPOINT="$TEMPLATE_ENDPOINT"
+    echo "Using endpoint from template: $SERVER_ENDPOINT"
+# Fall back to auto-detection as last resort
+elif [ -z "$SERVER_ENDPOINT" ]; then
     # Try to get server's IP
     if [ -z "$SERVER_IP" ]; then
         SERVER_IP=$(hostname -I | awk '{print $1}')
@@ -199,7 +265,9 @@ if [ -z "$SERVER_ENDPOINT" ]; then
     if [ -n "$SERVER_IP" ]; then
         SERVER_ENDPOINT="${SERVER_IP}:${SERVER_PORT}"
         echo "Auto-detected server endpoint: $SERVER_ENDPOINT"
-        echo "NOTE: For external access, override with -e public.example.com:$SERVER_PORT"
+        echo "NOTE: This is likely just the local IP. For external access, override with:"
+        echo "      -e public.example.com:$SERVER_PORT"
+        echo "      or use an existing client config as template with -t"
     else
         echo "Warning: Could not auto-detect server IP"
         echo "Please specify server endpoint with -e option"
